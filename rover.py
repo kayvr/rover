@@ -456,7 +456,7 @@ def protocol_perform_land(
         target_path: Path,
         paths_to_exclude: set,
         is_recursive: bool,
-        leave_unread: bool):
+        leave_for_tour: bool):
     dest_rover_file_path = target_path / ".rover"
     src_rover_file = api_get_rover_file_from_url(url)
     original_files = []
@@ -465,7 +465,7 @@ def protocol_perform_land(
     else:
         original_files = getattr(read_rover_file(dest_rover_file_path), 'files')
 
-    if not leave_unread:
+    if not leave_for_tour:
         for file_entry in src_rover_file.files:
             file = getattr(file_entry, 'filename')
             if file not in paths_to_exclude:
@@ -481,7 +481,7 @@ def protocol_perform_land(
     # Note: The destination rover file will have been updated through calls to land_file
     dest_rover_file = read_rover_file(dest_rover_file_path)
 
-    if leave_unread:
+    if leave_for_tour:
         src_rover_file = RoverFile(
                 getattr(src_rover_file, "url"),
                 getattr(src_rover_file, "ver"),
@@ -501,14 +501,14 @@ def protocol_perform_land(
                 print("Have url, that is a directory, that does not contain a terminating slash.")
                 rec_url = rec_url + "/"
             rec_url_joined = urllib.parse.urljoin(rec_url, filename)
-            protocol_on_land(protocol, rec_url_joined, target_path / filename, is_recursive, leave_unread)
+            protocol_on_land(protocol, rec_url_joined, target_path / filename, is_recursive, leave_for_tour)
 
 def protocol_update_target(
         protocol: SupportedProtocol,
         url: str,
         target_path: Path,
         is_recursive: bool,
-        leave_unread: bool):
+        leave_for_tour: bool):
     mod_info = get_rover_dir_mod_info(target_path)
 
     target_modified_files = getattr(mod_info, "local_modified_files")
@@ -532,14 +532,14 @@ def protocol_update_target(
 
     # There are no altered files in common between the two directories. Copy
     # files in the source path to the destination path.
-    protocol_perform_land(protocol, url, target_path, target_altered_files, is_recursive, leave_unread)
+    protocol_perform_land(protocol, url, target_path, target_altered_files, is_recursive, leave_for_tour)
 
 def protocol_on_land(
         protocol: SupportedProtocol,
         url: str,
         target_path: Path,
         is_recursive: bool,
-        leave_unread: bool):
+        leave_for_tour: bool):
 
     if target_path.is_file():
         eprint(f"Land operates on directories. For individual files use fetch.")
@@ -548,7 +548,7 @@ def protocol_on_land(
     target_rover_file = target_path / ".rover"
     target_path_is_a_dir_and_non_empty = (target_path.is_dir() and len(os.listdir(target_path)) != 0)
     if target_path_is_a_dir_and_non_empty and target_rover_file.is_file():
-        protocol_update_target(protocol, url, target_path, is_recursive, leave_unread)
+        protocol_update_target(protocol, url, target_path, is_recursive, leave_for_tour)
     else:
         if target_path_is_a_dir_and_non_empty:
             eprint(f"Directory '{target_path}' is not empty and has no rover file.")
@@ -557,7 +557,7 @@ def protocol_on_land(
         if not target_path.is_dir():
             os.mkdir(target_path)
 
-        protocol_perform_land(protocol, url, target_path, set(), is_recursive, leave_unread)
+        protocol_perform_land(protocol, url, target_path, set(), is_recursive, leave_for_tour)
 
 def handle_status(args):
     path = Path(args.path)
@@ -587,10 +587,10 @@ def handle_fetch(args):
             eprint(f"Parent directory for file does not contain a rover file. {path}")
             sys.exit(1)
 
-        if not args.unread:
+        if not args.retour or not bool(args.retour):
             land_file(path)
         else:
-            mark_as_unread(path)
+            mark_for_tour(path)
 
 def handle_land(args):
     url_or_path = args.url_or_path[0]
@@ -610,10 +610,9 @@ def handle_land(args):
             sys.exit(1)
         target_path.mkdir(parents=True, exist_ok=True)
 
-    leave_unread = False
-    if args.unread is not None:
-        if args.unread == True:
-            leave_unread = True
+    leave_for_tour = False
+    if args.retour is not None and bool(args.retour):
+        leave_for_tour = True
 
     if not parsed_url.scheme in supported_protocols.keys():
         eprint(f"Unsupported protocol: {parsed_url.scheme}")
@@ -622,7 +621,7 @@ def handle_land(args):
     if target_path == None:
         target_path = Path.cwd() / Path(parsed_url.path).name
 
-    protocol_on_land(supported_protocols[parsed_url.scheme], url, target_path, args.recursive, leave_unread)
+    protocol_on_land(supported_protocols[parsed_url.scheme], url, target_path, args.recursive, leave_for_tour)
 
     print(f"Land complete")
 
@@ -993,11 +992,11 @@ def land_file(local_path):
 
     write_rover_file(local_path.parent, rover_file)
 
-def mark_as_unread(local_path):
+def mark_for_tour(local_path):
     target_path = local_path.parent
     rover_file_path = target_path / ".rover"
     if not rover_file_path.exists():
-        eprint(f"mark_as_unread: Tours must begin in a directory that contains a rover file. '{target_path}'")
+        eprint(f"mark_for_tour: Rover file does not exist. '{rover_file_path}'")
         sys.exit(1)
 
     local_rover_file = read_rover_file(rover_file_path)
@@ -1147,12 +1146,14 @@ def main():
     land_parser.add_argument('url_or_path', nargs=1, help='URL or filesystem path on which to operate.')
     land_parser.add_argument('target_path', nargs='?', help='Optional location to land into.')
     land_parser.add_argument("--recursive", dest='recursive', action='store_true', help="Recursively land.")
-    land_parser.add_argument("--unread", dest='unread', action='store_true', help="Mark landed files as unread.")
+    land_parser.add_argument("--retour", dest='retour', action='store_true', help="Does not land any files. All files that would have landed will show up in 'rover tour'.")
+    land_parser.add_argument("-u", "--leave-unread", dest='leave_unread', action='store_true', help="Does not land any files. All files are placed in an unread state and will not show up in rover tour until explictily added using 'rover fetch -u'")
     land_parser.set_defaults(func=handle_land)
 
     fetch_parser = subparsers.add_parser('fetch', help='Fetches individual files.')
     fetch_parser.add_argument('path', nargs='+', help='Path to file which should be fetch.')
-    fetch_parser.add_argument('--unread', dest="unread", action='store_true', help='Deletes the file and marks it as unread.')
+    fetch_parser.add_argument('--retour', dest="retour", action='store_true', help="Deletes the file and ensures it will show up as part of 'rover tour'.")
+    fetch_parser.add_argument('-u', '--retour-unread', dest="retour_unread", action='store_true', help="Takes one file that has been marked as 'unread' and places it back on 'rover tour'. ")
     fetch_parser.add_argument('stdin', nargs='?', type=argparse.FileType('r'), default=sys.stdin)
     fetch_parser.set_defaults(func=handle_fetch)
 
