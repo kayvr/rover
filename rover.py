@@ -15,11 +15,12 @@ import types
 import typing
 import time
 import configparser
+import socket
 from typing import NamedTuple # Requires python 3.6
 from pathlib import Path
 
 # .ROVER File structure.
-class FileEntry(NamedTuple): # fil
+class FileEntry(NamedTuple):
     sha: str
     ver: str
     key: str
@@ -47,8 +48,11 @@ def FileEntry_get_filename_only(file_entry: FileEntry):
 
 subcommand_names = ["status","land","fetch","tour","submit","url"]
 verbose = False
-parse_url = urllib.parse.urlparse
-empty_sha = "0000000000000000000000000000000000000000000000000000000000000000"
+parse_url  = urllib.parse.urlparse
+empty_sha  = "0000000000000000000000000000000000000000000000000000000000000000"
+unread_sha = empty_sha
+error_sha  = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+error_occurred = False
 
 rover_file_url_prefix       = "url "
 rover_file_version_prefix   = "ver "
@@ -84,7 +88,6 @@ for entry in Path(rover_script_path).parent.iterdir():
         if entry.name not in urllib.parse.uses_relative:
             urllib.parse.uses_relative.append(entry.name)
             urllib.parse.uses_netloc.append(entry.name)
-
 
 # Implementation of the 'file://' protocol.
 class FileProtocol:
@@ -451,12 +454,12 @@ def get_untracked_files(path, rover_file):
     return locally_added_files
 
 def protocol_perform_land(
-        protocol: SupportedProtocol,
         url: str,
         target_path: Path,
         paths_to_exclude: set,
         is_recursive: bool,
-        leave_for_tour: bool):
+        leave_for_tour: bool,
+        leave_unread: bool):
     dest_rover_file_path = target_path / ".rover"
     src_rover_file = api_get_rover_file_from_url(url)
     original_files = []
@@ -465,7 +468,7 @@ def protocol_perform_land(
     else:
         original_files = getattr(read_rover_file(dest_rover_file_path), 'files')
 
-    if not leave_for_tour:
+    if not leave_for_tour and not leave_unread:
         for file_entry in src_rover_file.files:
             file = getattr(file_entry, 'filename')
             if file not in paths_to_exclude:
@@ -487,6 +490,23 @@ def protocol_perform_land(
                 getattr(src_rover_file, "ver"),
                 original_files,
                 getattr(src_rover_file, "directories"))
+    elif leave_unread:
+        # For any files that are not in original_files, write empty_hash.
+        preexisting_filenames = set([getattr(x,"filename") for x in original_files])
+        for file in getattr(dest_rover_file, "files"):
+            if getattr(file,"filename") not in preexisting_filenames:
+                original_files.append(FileEntry(
+                    unread_sha,
+                    getattr(file,"ver"),
+                    getattr(file,"key"),
+                    getattr(file,"abs_path"),
+                    getattr(file,"filename"),
+                    getattr(file,"metadata")))
+        src_rover_file = RoverFile(
+                getattr(src_rover_file, "url"),
+                getattr(src_rover_file, "ver"),
+                original_files,
+                getattr(src_rover_file, "directories"))
     else:
         src_rover_file = dest_rover_file
 
@@ -501,14 +521,14 @@ def protocol_perform_land(
                 print("Have url, that is a directory, that does not contain a terminating slash.")
                 rec_url = rec_url + "/"
             rec_url_joined = urllib.parse.urljoin(rec_url, filename)
-            protocol_on_land(protocol, rec_url_joined, target_path / filename, is_recursive, leave_for_tour)
+            protocol_on_land(rec_url_joined, target_path / filename, is_recursive, leave_for_tour, leave_unread)
 
 def protocol_update_target(
-        protocol: SupportedProtocol,
         url: str,
         target_path: Path,
         is_recursive: bool,
-        leave_for_tour: bool):
+        leave_for_tour: bool,
+        leave_unread: bool):
     mod_info = get_rover_dir_mod_info(target_path)
 
     target_modified_files = getattr(mod_info, "local_modified_files")
@@ -532,14 +552,14 @@ def protocol_update_target(
 
     # There are no altered files in common between the two directories. Copy
     # files in the source path to the destination path.
-    protocol_perform_land(protocol, url, target_path, target_altered_files, is_recursive, leave_for_tour)
+    protocol_perform_land(url, target_path, target_altered_files, is_recursive, leave_for_tour, leave_unread)
 
 def protocol_on_land(
-        protocol: SupportedProtocol,
         url: str,
         target_path: Path,
         is_recursive: bool,
-        leave_for_tour: bool):
+        leave_for_tour: bool,
+        leave_unread: bool):
 
     if target_path.is_file():
         eprint(f"Land operates on directories. For individual files use fetch.")
@@ -548,7 +568,7 @@ def protocol_on_land(
     target_rover_file = target_path / ".rover"
     target_path_is_a_dir_and_non_empty = (target_path.is_dir() and len(os.listdir(target_path)) != 0)
     if target_path_is_a_dir_and_non_empty and target_rover_file.is_file():
-        protocol_update_target(protocol, url, target_path, is_recursive, leave_for_tour)
+        protocol_update_target(url, target_path, is_recursive, leave_for_tour, leave_unread)
     else:
         if target_path_is_a_dir_and_non_empty:
             eprint(f"Directory '{target_path}' is not empty and has no rover file.")
@@ -557,7 +577,7 @@ def protocol_on_land(
         if not target_path.is_dir():
             os.mkdir(target_path)
 
-        protocol_perform_land(protocol, url, target_path, set(), is_recursive, leave_for_tour)
+        protocol_perform_land(url, target_path, set(), is_recursive, leave_for_tour, leave_unread)
 
 def handle_status(args):
     path = Path(args.path)
@@ -576,18 +596,36 @@ def handle_status(args):
     do_status(path, is_recursive, recursive_rel_path)
 
 def handle_fetch(args):
+    unread_argument = args.unread and bool(args.unread)
     for path in args.path:
         path = Path(path)
-        if path.is_dir():
-            eprint("Fetch works on individual files.")
-            sys.exit(1)
-
         rover_file = Path(path.parent) / ".rover"
+        if path.is_dir():
+            if not unread_argument:
+                eprint("Fetch works on individual files.")
+                sys.exit(1)
+            rover_file = Path(path) / ".rover"
+
         if not rover_file.exists():
             eprint(f"Parent directory for file does not contain a rover file. {path}")
             sys.exit(1)
 
-        if not args.retour or not bool(args.retour):
+        if unread_argument and path.is_dir():
+            # Pick a the first file with an empty SHA since no file was specified.
+            local_rover_file = read_rover_file(rover_file)
+            found_unread_file = False
+            for file in getattr(local_rover_file, "files"):
+                if getattr(file, "sha") == unread_sha:
+                    filename = FileEntry_get_filename_only(file)
+                    path = path / filename
+                    print(f"{filename} added to tour")
+                    found_unread_file = True
+                    break
+            if not found_unread_file:
+                print(f"No more unread files.")
+                sys.exit(0)
+
+        if not unread_argument:
             land_file(path)
         else:
             mark_for_tour(path)
@@ -610,9 +648,12 @@ def handle_land(args):
             sys.exit(1)
         target_path.mkdir(parents=True, exist_ok=True)
 
-    leave_for_tour = False
-    if args.retour is not None and bool(args.retour):
-        leave_for_tour = True
+    leave_for_tour = args.retour is not None and bool(args.retour)
+    leave_unread = args.unread is not None and bool(args.unread)
+
+    if leave_for_tour and leave_unread:
+        eprint(f"--retour and --unread are mutually exclusive.")
+        sys.exit(1)
 
     if not parsed_url.scheme in supported_protocols.keys():
         eprint(f"Unsupported protocol: {parsed_url.scheme}")
@@ -621,7 +662,7 @@ def handle_land(args):
     if target_path == None:
         target_path = Path.cwd() / Path(parsed_url.path).name
 
-    protocol_on_land(supported_protocols[parsed_url.scheme], url, target_path, args.recursive, leave_for_tour)
+    protocol_on_land(url, target_path, args.recursive, leave_for_tour, leave_unread)
 
     print(f"Land complete")
 
@@ -770,7 +811,7 @@ def get_rover_dir_mod_info(target_path):
             local_file = local_file_dict[remote_filename]
             local_sha = getattr(local_file, "sha")
             remote_sha = getattr(remote_file, "sha")
-            if local_sha != remote_sha and remote_sha != empty_sha:
+            if local_sha != remote_sha and remote_sha != unread_sha and remote_sha != error_sha:
                 remote_modified_files.append(remote_filename)
         else:
             remote_added_files.append(remote_filename)
@@ -836,11 +877,14 @@ def do_tour(target_path, operation_type, is_recursive, recursive_rel_path):
         sys.exit(1)
 
     remote_deleted_files = getattr(dir_mod_info, "remote_deleted_files")
-    union_altered_deleted = set(local_altered_files) & set(remote_deleted_files)
-    if len(union_altered_deleted) > 0:
-        if set(union_altered_deleted) != set(local_deleted_files):
-            print(f"Note: Remote deleted files have been deleted locally. '{target_path}'", file=sys.stderr)
-            print(f"Conflicting files: {union_altered_deleted}", file=sys.stderr)
+
+    # Printing out remote deleted files that have been deleted or altered
+    # locally is of no relevance.
+    # union_altered_deleted = set(local_altered_files) & set(remote_deleted_files)
+    # if len(union_altered_deleted) > 0:
+    #     if set(union_altered_deleted) != set(local_deleted_files):
+    #         print(f"Note: Remote deleted files have been deleted locally. '{target_path}'", file=sys.stderr)
+    #         print(f"Conflicting files: {union_altered_deleted}", file=sys.stderr)
 
     remote_added_files = getattr(dir_mod_info, "remote_added_files")
     union_altered_added = set(local_altered_files) & set(remote_added_files)
@@ -933,8 +977,16 @@ def land_file(local_path):
         try:
             api_land_file(file_url, local_path)
         except RuntimeError as e:
-            eprint(f"Failed to land url '{file_url}': {e}")
+            eprint(f"Failed to land url '{file_url}'.")
+            eprint(f"Exception: {e}")
             failed_land = True
+            error_occurred = True
+        except socket.gaierror as e:
+            eprint(f"Failed to land url. '{file_url}'.")
+            eprint(f"Socket Exception: {e}")
+            eprint("Ignoring file.")
+            failed_land = True
+            error_occurred = True
 
     file_entry = None
     ver = "0"
@@ -943,25 +995,31 @@ def land_file(local_path):
     for file in remote_rover_file.files:
         if FileEntry_get_filename_only(file) == local_path.name:
             file_entry = file
+            break
 
     if file_entry is None:
-        eprint(f"Failed to find remote file. {local_path.name}")
-        eprint(f"{remote_rover_file}")
-        raise RuntimeError(f"Failed to find remote file. {local_path.name}")
+        failed_land = True
+        eprint(f"Failed to find remote file. Filename: '{local_path.name}'")
 
-    # TODO Describe the purpose of "0" version. Need to spec this out better.
-    if getattr(local_rover_file, 'ver') == "0":
+    if failed_land:
+        abs_path = 1 if is_absolute_url else 0
+        filename = file_url if is_absolute_url else local_path.name
+        metadata = "" if file_entry is None else getattr(file_entry,"metadata")
+        file_entry = FileEntry(
+                error_sha,
+                0,
+                0,
+                abs_path,
+                filename,
+                metadata)
+    elif getattr(local_rover_file, 'ver') == "0":
+        # A version of zero for the directory means.
         remote_file_entry = file_entry
-        if not failed_land:
-            file_contents = open(local_path, 'r', encoding='utf-8').read()
-            sha = hashlib.sha256(file_contents.encode('utf-8')).hexdigest()
-            stat = os.stat(local_path)
-            mtime = int(os.path.getmtime(local_path))
-            inode = stat.st_ino
-        else:
-            sha = empty_sha
-            mtime = 0
-            inode = 0
+        file_contents = open(local_path, 'r', encoding='utf-8').read()
+        sha = hashlib.sha256(file_contents.encode('utf-8')).hexdigest()
+        stat = os.stat(local_path)
+        mtime = int(os.path.getmtime(local_path))
+        inode = stat.st_ino
         abs_path = 1 if is_absolute_url else 0
         filename = file_url if is_absolute_url else local_path.name
         file_entry = FileEntry(
@@ -1013,7 +1071,9 @@ def mark_for_tour(local_path):
             getattr(local_rover_file, "directories"))
 
     write_rover_file(local_path.parent, rover_file)
-    local_path.unlink()
+
+    if local_path.exists():
+        local_path.unlink()
 
 def do_submit(target_path, is_recursive):
     rover_directory = target_path
@@ -1133,6 +1193,11 @@ def main():
     if not have_subcommands and not have_hyphenated_argument:
         cli_args.insert(0,"land")
 
+    # 'rover fetch' is equivalent to 'rover fetch -u ."
+    if cli_args[0] == "fetch" and len(cli_args) == 1:
+        cli_args.append("-u")
+        cli_args.append(".")
+
     parser = argparse.ArgumentParser(description='A tool for interacting with versioned directories.')
     parser.add_argument('-v', '--verbose', dest='verbose', action='store_true', help='Verbose output')
     subparsers = parser.add_subparsers(help='')
@@ -1147,13 +1212,12 @@ def main():
     land_parser.add_argument('target_path', nargs='?', help='Optional location to land into.')
     land_parser.add_argument("--recursive", dest='recursive', action='store_true', help="Recursively land.")
     land_parser.add_argument("--retour", dest='retour', action='store_true', help="Does not land any files. All files that would have landed will show up in 'rover tour'.")
-    land_parser.add_argument("-u", "--leave-unread", dest='leave_unread', action='store_true', help="Does not land any files. All files are placed in an unread state and will not show up in rover tour until explictily added using 'rover fetch -u'")
+    land_parser.add_argument("-u", "--unread", dest='unread', action='store_true', help="Does not land any files. All files are placed in an unread state and will not show up in rover tour until explictily added using 'rover fetch -u <dir>'")
     land_parser.set_defaults(func=handle_land)
 
     fetch_parser = subparsers.add_parser('fetch', help='Fetches individual files.')
     fetch_parser.add_argument('path', nargs='+', help='Path to file which should be fetch.')
-    fetch_parser.add_argument('--retour', dest="retour", action='store_true', help="Deletes the file and ensures it will show up as part of 'rover tour'.")
-    fetch_parser.add_argument('-u', '--retour-unread', dest="retour_unread", action='store_true', help="Takes one file that has been marked as 'unread' and places it back on 'rover tour'. ")
+    fetch_parser.add_argument('-u', '--unread', dest="unread", action='store_true', help="If 'path' is a file, then the file will be added to 'rover tour'. If a directory, it takes an unread file from the directory and places it back on 'rover tour'. ")
     fetch_parser.add_argument('stdin', nargs='?', type=argparse.FileType('r'), default=sys.stdin)
     fetch_parser.set_defaults(func=handle_fetch)
 
@@ -1182,7 +1246,10 @@ def main():
     # Call subcommand that was indicated using set_defaults.
     args.func(args)
 
-    sys.exit(0)
+    if not error_occurred:
+        sys.exit(0)
+    else:
+        sys.exit(1)
 
 if __name__ == '__main__':
     main()
