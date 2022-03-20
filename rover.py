@@ -92,6 +92,17 @@ for entry in Path(rover_script_path).parent.iterdir():
 # Implementation of the 'file://' protocol.
 class FileProtocol:
     @staticmethod
+    def api_canonicalize_url(url: str):
+        # Directories may or may not have a '/' suffix. We expect directories
+        # to have the '/' suffix.
+        parsed_url = parse_url(url)
+        source_path = Path(parsed_url.path)
+        if source_path.is_dir():
+            if not url.endswith("/"):
+                url = url + "/"
+        return url
+
+    @staticmethod
     def api_use_abspath():
         return False
 
@@ -136,6 +147,10 @@ def get_protocol(url: str):
         protocol.spec.loader.exec_module(protocol.module)
         loaded_protocols.add(protocol.name)
     return protocol.module
+
+def api_canonicalize_url(url: str):
+    protocol = get_protocol(url)
+    return protocol.api_canonicalize_url(url)
 
 def api_use_abspath(url: str):
     protocol = get_protocol(url)
@@ -205,6 +220,9 @@ class RoverDirModInfo(NamedTuple):
 
 def eprint(*args, **kwargs):
     print("ERROR:", *args, file=sys.stderr, **kwargs)
+
+def wprint(*args, **kwargs):
+    print("warning:", *args, file=sys.stderr, **kwargs)
 
 def read_integer(line):
     index = 0
@@ -324,7 +342,7 @@ def generate_rover_file_from_path(source_path):
                 file_contents = open(item, 'r', encoding="utf-8").read()
                 sha = hashlib.sha256(file_contents.encode('utf-8')).hexdigest()
             except UnicodeDecodeError as e:
-                print(f"Ignoring invalid utf-8 file. {item} {e}")
+                print(f"Ignoring invalid utf-8 file. {item}")
                 continue
             stat = os.stat(item)
             mtime = int(os.path.getmtime(item))
@@ -516,10 +534,6 @@ def protocol_perform_land(
         for dir_entry in src_rover_file.directories:
             filename = getattr(dir_entry, 'filename')
             rec_url = getattr(src_rover_file, 'url')
-            # Directories must support a forward slash after the name.
-            if not rec_url.endswith("/"):
-                print("Have url, that is a directory, that does not contain a terminating slash.")
-                rec_url = rec_url + "/"
             rec_url_joined = urllib.parse.urljoin(rec_url, filename)
             protocol_on_land(rec_url_joined, target_path / filename, is_recursive, leave_for_tour, leave_unread)
 
@@ -633,8 +647,8 @@ def handle_fetch(args):
 def handle_land(args):
     url_or_path = args.url_or_path[0]
     url = path_to_url(url_or_path)
+    url = api_canonicalize_url(url)
 
-    parsed_url = urllib.parse.urlparse(url)
     target_path = None
     if url_or_path == ".":
         target_path = Path.cwd()
@@ -655,6 +669,7 @@ def handle_land(args):
         eprint(f"--retour and --unread are mutually exclusive.")
         sys.exit(1)
 
+    parsed_url = urllib.parse.urlparse(url)
     if not parsed_url.scheme in supported_protocols.keys():
         eprint(f"Unsupported protocol: {parsed_url.scheme}")
         sys.exit(1)
@@ -977,14 +992,13 @@ def land_file(local_path):
         try:
             api_land_file(file_url, local_path)
         except RuntimeError as e:
-            eprint(f"Failed to land url '{file_url}'.")
-            eprint(f"Exception: {e}")
+            wprint(f"Failed to land url '{file_url}'.")
+            wprint(f"Exception: {e}")
             failed_land = True
             error_occurred = True
         except socket.gaierror as e:
-            eprint(f"Failed to land url. '{file_url}'.")
-            eprint(f"Socket Exception: {e}")
-            eprint("Ignoring file.")
+            wprint(f"Failed to land url. '{file_url}'.")
+            wprint(f"Socket Exception: {e}")
             failed_land = True
             error_occurred = True
 
