@@ -46,7 +46,7 @@ def FileEntry_get_filename_only(file_entry: FileEntry):
 
     return getattr(file_entry, "filename")
 
-subcommand_names = ["status","land","fetch","tour","submit","url"]
+subcommand_names = ["status","land","fetch","tour","submit","url","mkdir"]
 verbose = False
 parse_url  = urllib.parse.urlparse
 empty_sha  = "0000000000000000000000000000000000000000000000000000000000000000"
@@ -132,7 +132,8 @@ class FileProtocol:
 
     @staticmethod
     def api_mkdir(url: str):
-        print("api_mkdir: TODO")
+        destination = parse_url(url).path
+        os.mkdir(destination)
 
 def get_protocol(url: str):
     scheme = parse_url(url).scheme
@@ -170,6 +171,15 @@ def api_submit_file(url: str, local_path: Path):
         start = time.time()
     protocol = get_protocol(url)
     protocol.api_submit_file(url, local_path)
+    if verbose:
+        duration = time.time() - start
+        print(f"API Call [{duration:5.2}s]: api_submit_file {url}", file=sys.stderr)
+
+def api_mkdir(url: str):
+    if verbose:
+        start = time.time()
+    protocol = get_protocol(url)
+    protocol.api_mkdir(url)
     if verbose:
         duration = time.time() - start
         print(f"API Call [{duration:5.2}s]: api_submit_file {url}", file=sys.stderr)
@@ -364,76 +374,6 @@ def generate_rover_file_from_path(source_path):
 
     return rover_file
 
-def path_to_url(path_or_url):
-    # Early out when protocol is explicitly specified.
-    if any(path_or_url.startswith(f"{k}://") for k in supported_protocols.keys()):
-        return path_or_url
-
-    # XXX The following logic could do with some simplification. This function
-    #     is only used for 'rover land' and was rolled early in development.
-    path_to_rover_file = None
-    rover_file_entry = ""
-    if path_or_url == '.':
-        path_to_rover_file = Path.cwd() / ".rover"
-    else:
-        # Interpret the url as a path.
-        path = Path(path_or_url)
-        if path.is_dir():
-            path_to_rover_file = path / ".rover"
-            if not path_to_rover_file.is_file():
-                # Check to see whether this directory is included in the .rover file in the parent's directory.
-                rover_file_entry = path.name
-                path_to_rover_file = path.parent.absolute() / ".rover"
-                if not path_to_rover_file.is_file():
-                    # Since no rover file is found, interpret absolute paths as a
-                    # file checkout.
-                    if os.path.isabs(path):
-                        # Assume the user wants to use the file:// protocol.
-                        return "file://" + path_or_url
-                    eprint(f"Have directory '{path}' but no rover file found in the directory or parent directory.")
-                    sys.exit(1)
-                rover_file = read_rover_file(path_to_rover_file)
-                all_directory_names = [getattr(x,'filename') for x in rover_file.directories]
-                if not path.name in all_directory_names:
-                    eprint(f"Directory '{path.name}' not found in {path_to_rover_file}")
-                    sys.exit(1)
-        elif path.is_file():
-            path_to_rover_file = path.parent.absolute() / ".rover"
-            rover_file_entry = path.name
-        else:
-            # First, check if the path is absolute. We interpret absolute,
-            # non-existent, paths as file:// lands.
-            if os.path.isabs(path):
-                return "file://" + path_or_url
-            # Check if the parent of the file that doesn't exist includes a .rover file.
-            path_to_rover_file = path.parent.absolute() / ".rover"
-            rover_file_entry = path.name
-            rover_file = read_rover_file(path_to_rover_file)
-            in_rover_directories = rover_file_entry in rover_file.directories
-            in_rover_files = False
-            for file in rover_file.files:
-                if file.filename == rover_file_entry:
-                    in_rover_files = True
-                    break
-            if not in_rover_directories and not in_rover_files:
-                eprint(f"Directory/File '{path.name}' not found in {path_to_rover_file}")
-                sys.exit(1)
-
-    if not path_to_rover_file:
-        eprint(f"Failed to canonicalize: {path_or_url}")
-        sys.exit(1)
-
-    if not path_to_rover_file.is_file():
-        eprint("No '.rover' file not found at: '{path_to_rover_file}' from '{path_or_url}'")
-        sys.exit(1)
-
-    rover_file = read_rover_file(path_to_rover_file)
-
-    if len(rover_file_entry) > 0:
-        return getattr(rover_file, "url") + f"/{rover_file_entry}"
-    else:
-        return getattr(rover_file, "url")
-
 def get_modified_files(path, rover_file):
     files_changed_locally = []
     for dir_element in path.iterdir():
@@ -479,21 +419,22 @@ def protocol_perform_land(
         leave_for_tour: bool,
         leave_unread: bool):
     dest_rover_file_path = target_path / ".rover"
-    src_rover_file = api_get_rover_file_from_url(url)
+    remote_rover_file = api_get_rover_file_from_url(url)
     original_files = []
     if not dest_rover_file_path.exists():
-        write_rover_file(dest_rover_file_path.parent, src_rover_file)
+        write_rover_file(dest_rover_file_path.parent, remote_rover_file)
     else:
-        original_files = getattr(read_rover_file(dest_rover_file_path), 'files')
+        original_rover_file = read_rover_file(dest_rover_file_path)
+        original_files = getattr(original_rover_file, 'files')
 
     if not leave_for_tour and not leave_unread:
-        for file_entry in src_rover_file.files:
+        for file_entry in remote_rover_file.files:
             file = getattr(file_entry, 'filename')
             if file not in paths_to_exclude:
                 dest = target_path / Path(file).name
                 land_file(dest)
 
-    for dir_entry in src_rover_file.directories:
+    for dir_entry in remote_rover_file.directories:
         d = getattr(dir_entry, 'filename')
         dest = target_path / Path(d)
         if not dest.exists():
@@ -501,13 +442,19 @@ def protocol_perform_land(
 
     # Note: The destination rover file will have been updated through calls to land_file
     dest_rover_file = read_rover_file(dest_rover_file_path)
+    # Update dest_rover_file with directories from remote.
+    dest_rover_file = RoverFile(
+            getattr(dest_rover_file, "url"),
+            getattr(dest_rover_file, "ver"),
+            getattr(dest_rover_file, "files"),
+            getattr(remote_rover_file, "directories"))
 
     if leave_for_tour:
         src_rover_file = RoverFile(
-                getattr(src_rover_file, "url"),
-                getattr(src_rover_file, "ver"),
+                getattr(remote_rover_file, "url"),
+                getattr(remote_rover_file, "ver"),
                 original_files,
-                getattr(src_rover_file, "directories"))
+                getattr(remote_rover_file, "directories"))
     elif leave_unread:
         # For any files that are not in original_files, write empty_hash.
         preexisting_filenames = set([getattr(x,"filename") for x in original_files])
@@ -521,10 +468,10 @@ def protocol_perform_land(
                     getattr(file,"filename"),
                     getattr(file,"metadata")))
         src_rover_file = RoverFile(
-                getattr(src_rover_file, "url"),
-                getattr(src_rover_file, "ver"),
+                getattr(remote_rover_file, "url"),
+                getattr(remote_rover_file, "ver"),
                 original_files,
-                getattr(src_rover_file, "directories"))
+                getattr(remote_rover_file, "directories"))
     else:
         src_rover_file = dest_rover_file
 
@@ -644,9 +591,28 @@ def handle_fetch(args):
         else:
             mark_for_tour(path)
 
+def is_url(input: str):
+    if any(input.startswith(f"{k}://") for k in supported_protocols.keys()):
+        return True
+    else:
+        return False
+
 def handle_land(args):
     url_or_path = args.url_or_path[0]
-    url = path_to_url(url_or_path)
+    url = url_or_path
+    is_relative_directory = False
+    if not is_url(url):
+        path = Path(url_or_path)
+        is_relative_directory = path.is_dir() and not path.is_absolute()
+        found, url, metadata = get_url_and_metadata_from_path(path)
+        if not found:
+            if path.is_dir() and os.path.isabs(path):
+                # Assume the user wants to use the file:// protocol.
+                url = "file://" + url_or_path
+            else:
+                eprint(f"Failed to land '{path}'.")
+                sys.exit(1)
+
     url = api_canonicalize_url(url)
 
     target_path = None
@@ -661,6 +627,8 @@ def handle_land(args):
             eprint(f"target_path argument already exists as a file or directory. target_path '{args.target_path}'")
             sys.exit(1)
         target_path.mkdir(parents=True, exist_ok=True)
+    elif is_relative_directory:
+        target_path = Path(url_or_path)
 
     leave_for_tour = args.retour is not None and bool(args.retour)
     leave_unread = args.unread is not None and bool(args.unread)
@@ -729,6 +697,122 @@ def handle_submit(args):
 
     print(f"Submit complete")
 
+def handle_mkdir(args):
+    if len(args.dir_or_url) == 0 or len(args.dir_or_url) > 1:
+        eprint("Expected directory or URL")
+        sys.exit(1)
+
+    dir_or_url = args.dir_or_url[0]
+
+    # Should make the directory remotely?
+    if any(dir_or_url.startswith(f"{k}://") for k in supported_protocols.keys()):
+        # Note: This path does *not* assume any pre-existing rover file.
+        # As such, no rover file will be modified using this path.
+        target_path = Path.cwd() / Path(parse_url(dir_or_url).path).name
+        api_mkdir(dir_or_url)
+        invalidate_caches()
+        protocol_on_land(dir_or_url, target_path, False, False, False)
+        return
+
+    directory_name = dir_or_url
+    target_path = Path.cwd() / directory_name
+    do_mkdir(Path.cwd(), target_path)
+
+    print("Directory created")   
+
+def check_if_directory_is_in_parent_rover(path: Path):
+    path = path.absolute()
+    directory_name = path.name
+
+    target_path = Path(path.parent)
+    rover_file_path = target_path / ".rover"
+    if not rover_file_path.exists():
+        return (False, "", "")
+
+    local_rover_file = read_rover_file(rover_file_path)
+
+    # Rover file exists, check to see if the directory exists in in the parent rover file.
+    parent_url = getattr(local_rover_file, "url")
+    dir_url = ""
+    url_metadata = ""
+    found_dir = False
+    for directory in getattr(local_rover_file, "directories"):
+        if getattr(directory, "filename") == directory_name:
+            found_dir = True
+            dir_url = parent_url + getattr(directory, "filename") + "/"
+            url_metadata = getattr(directory, "metadata")
+            break
+
+    if not found_dir:
+        return (False, "", "")
+
+    return (True, dir_url, url_metadata)
+
+def get_url_and_metadata_from_path(path: Path):
+    target_path = path
+    if path.is_file():
+        target_path = Path(path.parent)
+    elif not path.exists():
+        # If the file does not exist, it could still be in the rover file.
+        target_path = Path(path.parent)
+
+    rover_file_path = target_path / ".rover"
+    if not rover_file_path.exists():
+        # If the path is a directory, search for a rover file in the parent
+        # and verify that the directory is in the rover file.
+        if path.is_dir():
+            return check_if_directory_is_in_parent_rover(path)
+        else:
+            return (False, "", "")
+
+    local_rover_file = read_rover_file(rover_file_path)
+    url = getattr(local_rover_file, "url")
+
+    if path.is_dir():
+        return (True, url, "") # Directories are easy.
+
+    parsed_url = urllib.parse.urlparse(url)
+
+    if parsed_url.scheme not in supported_protocols.keys():
+        eprint(f"Unable to obtain url file: unsupported protocol '{parsed_url.scheme}'")
+        sys.exit(1)
+
+    # XXX Note the code duplication with land_file.
+    # Special case for and abspath protocols. We have no guarantees of where
+    # files are located when using full URLs.
+    file_url = ""
+    url_metadata = ""
+    is_absolute_url = False
+    found_file = False
+    file_url = urllib.parse.urljoin(url, path.name)
+    for file in getattr(local_rover_file, "files"):
+        if FileEntry_get_filename_only(file) == path.name:
+            found_file = True
+            if getattr(file, "abs_path") != "0":
+                # Purposfully do NOT use FileEntry_get_filename
+                file_url = getattr(file, "filename")
+                url_metadata = getattr(file, "metadata")
+                is_absolute_url = True
+            break
+    if not found_file and api_use_abspath(url):
+        # Why this special case is needed: rover tour returns files that
+        # have been added on the remote. It returns paths to local files
+        # only. If a protocol uses absolute paths, then we can't reliably
+        # reconstruct the URL from the URL in the .rover file and the
+        # filename only.
+        remote_rover_file = api_get_rover_file_from_url(url)
+        for file in getattr(remote_rover_file, "files"):
+            if FileEntry_get_filename_only(file) == path.name:
+                file_url = getattr(file, "filename")
+                url_metadata = getattr(file, "metadata")
+                break
+
+    if not found_file:
+        return (False, file_url, url_metadata)
+
+    return (True, file_url, url_metadata)
+
+
 def handle_url(args):
     if not args.path:
         eprint("Paths to convert must be given")
@@ -736,63 +820,17 @@ def handle_url(args):
 
     for path in args.path:
         path = Path(path)
-        if path.is_dir():
-            eprint("'url' subcommand operates on individual files.")
+
+        found, url, metadata = get_url_and_metadata_from_path(path)
+
+        if not found:
+            eprint(f"Failed to find rover url for: {path}. No rover file?")
             sys.exit(1)
-
-        rover_file = Path(path.parent) / ".rover"
-        if not rover_file.exists():
-            eprint(f"Parent directory for file does not contain a rover file. {path}")
-            sys.exit(1)
-
-        target_path = path.parent
-        rover_file_path = target_path / ".rover"
-        if not rover_file_path.exists():
-            eprint(f"'url': did not find rover file where land is being attempted. '{target_path}'")
-            sys.exit(1)
-
-        local_rover_file = read_rover_file(rover_file_path)
-        url = getattr(local_rover_file, "url")
-        parsed_url = urllib.parse.urlparse(url)
-
-        if parsed_url.scheme not in supported_protocols.keys():
-            eprint(f"Unable to obtain url file: unsupported protocol '{parsed_url.scheme}'")
-            sys.exit(1)
-
-        # XXX Note the code duplication with land_file.
-        # Special case for and abspath protocols. We have no guarantees of where
-        # files are located when using full URLs.
-        file_url = ""
-        url_metadata = ""
-        is_absolute_url = False
-        found_file = False
-        file_url = urllib.parse.urljoin(url, path.name)
-        for file in getattr(local_rover_file, "files"):
-            if FileEntry_get_filename_only(file) == path.name:
-                found_file = True
-                if getattr(file, "abs_path") != "0":
-                    # Purposfully do NOT use FileEntry_get_filename
-                    file_url = getattr(file, "filename")
-                    url_metadata = getattr(file, "metadata")
-                    is_absolute_url = True
-                break
-        if not found_file and api_use_abspath(url):
-            # Why this special case is needed: rover tour returns files that
-            # have been added on the remote. It returns paths to local files
-            # only. If a protocol uses absolute paths, then we can't reliably
-            # reconstruct the URL from the URL in the .rover file and the
-            # filename only.
-            remote_rover_file = api_get_rover_file_from_url(url)
-            for file in getattr(remote_rover_file, "files"):
-                if FileEntry_get_filename_only(file) == path.name:
-                    file_url = getattr(file, "filename")
-                    url_metadata = getattr(file, "metadata")
-                    break
 
         if args.metadata:
-            print(url_metadata)
+            print(metadata)
         else:
-            print(file_url)
+            print(url)
 
 def get_rover_dir_mod_info(target_path):
     rover_file_path = target_path / ".rover"
@@ -1156,7 +1194,40 @@ def do_submit(target_path, is_recursive):
         if is_recursive:
             for entry in target_path.iterdir():
                 if entry.is_dir():
+                    new_dir_rover_file = entry / ".rover"
+                    if not new_dir_rover_file.exists():
+                        wprint(f"Directory '{entry}' does not contain a rover file. Skipping. Use rover submit <dir> to submit the directory")
+                        continue
                     do_submit(entry, is_recursive)
+
+def do_mkdir(parent_directory, target_path):
+    if target_path.exists():
+        eprint(f"mkdir: Cannot create directory. Path already exists: {directory_name}")
+        sys.exit(1)
+
+    parent_rover_file_path = parent_directory / ".rover"
+    if not parent_rover_file_path.exists():
+        eprint(f"mkdir: Must be in a directory that contains a rover file. Current directory: '{parent_directory}'")
+        sys.exit(1)
+
+    directory_name = target_path.name
+    local_rover_file = read_rover_file(parent_rover_file_path)
+    target_url = getattr(local_rover_file, "url") + directory_name + "/"
+
+    api_mkdir(target_url)
+    invalidate_caches()
+    protocol_on_land(target_url, target_path, False, False, False)
+
+    # Update the parent rover file with the new directory once everything is finalized.
+    parent_rover_file = read_rover_file(parent_rover_file_path)
+    remote_rover_file = api_get_rover_file_from_url(getattr(parent_rover_file, "url"))
+    # Update dest_rover_file with directories from remote.
+    new_parent_rover_file = RoverFile(
+            getattr(parent_rover_file, "url"),
+            getattr(parent_rover_file, "ver"),
+            getattr(parent_rover_file, "files"),
+            getattr(remote_rover_file, "directories"))
+    write_rover_file(parent_directory, new_parent_rover_file)
 
 def do_status(path, is_recursive, recursive_rel_path):
     rover_file_path = path / ".rover"
@@ -1241,10 +1312,14 @@ def main():
     tour_parser.add_argument("--status", dest="status", action='store_true', help="Prints status of files in tour to stdout.")
     tour_parser.set_defaults(func=handle_tour)
 
-    submit_parser = subparsers.add_parser('submit', help='Submit changes to the remote. If applicable.')
+    submit_parser = subparsers.add_parser('submit', help='Submit changes to the remote. Only submits files, not directories. Use rover mkdir to build new directories.')
     submit_parser.add_argument('path', nargs='?', help='Submit a local directory hierarchy to the remote.')
     submit_parser.add_argument("--recursive", dest='recursive', action='store_true', help="Recursively submit.")
     submit_parser.set_defaults(func=handle_submit)
+
+    mkdir_parser = subparsers.add_parser('mkdir', help='Submit new directory. Must be in a rover directory. Directory is created relative to the current rover directory.')
+    mkdir_parser.add_argument('dir_or_url', nargs=1, help='Directory or URL. Create a new directory relative to CWD.')
+    mkdir_parser.set_defaults(func=handle_mkdir)
 
     url_parser = subparsers.add_parser('url', help='Returns a URL given a local filesystem path.')
     url_parser.add_argument('path', nargs='+', help='Paths to convert to URLs.')
