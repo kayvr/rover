@@ -720,12 +720,7 @@ def handle_mkdir(args):
 
     print("Directory created")   
 
-def check_if_directory_is_in_parent_rover(path: Path):
-    path = path.absolute()
-    directory_name = path.name
-
-    target_path = Path(path.parent)
-    rover_file_path = target_path / ".rover"
+def check_if_directory_is_in_rover(rover_file_path: Path, directory_name: str):
     if not rover_file_path.exists():
         return (False, "", "")
 
@@ -761,7 +756,10 @@ def get_url_and_metadata_from_path(path: Path):
         # If the path is a directory, search for a rover file in the parent
         # and verify that the directory is in the rover file.
         if path.is_dir():
-            return check_if_directory_is_in_parent_rover(path)
+            directory_name = path.absolute().name
+            target_path = Path(path.absolute().parent)
+            parent_rover_file_path = target_path / ".rover"
+            return check_if_directory_is_in_rover(parent_rover_file_path, directory_name)
         else:
             return (False, "", "")
 
@@ -808,7 +806,7 @@ def get_url_and_metadata_from_path(path: Path):
                 break
 
     if not found_file:
-        return (False, file_url, url_metadata)
+        return check_if_directory_is_in_rover(rover_file_path, path.name)
 
     return (True, file_url, url_metadata)
 
