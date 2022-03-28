@@ -584,7 +584,7 @@ def handle_fetch(args):
                     break
             if not found_unread_file:
                 print(f"No more unread files.")
-                sys.exit(0)
+                sys.exit(1)
 
         if not unread_argument:
             land_file(path)
@@ -767,7 +767,7 @@ def get_url_and_metadata_from_path(path: Path):
     url = getattr(local_rover_file, "url")
 
     if path.is_dir():
-        return (True, url, "") # Directories are easy.
+        return (True, url, "")
 
     parsed_url = urllib.parse.urlparse(url)
 
@@ -822,7 +822,7 @@ def handle_url(args):
         found, url, metadata = get_url_and_metadata_from_path(path)
 
         if not found:
-            eprint(f"Failed to find rover url for: {path}. No rover file?")
+            eprint(f"Failed to find rover url for: {path}.")
             sys.exit(1)
 
         if args.metadata:
@@ -1021,6 +1021,7 @@ def land_file(local_path):
     # Unsupported protocols can appear inside of FileEntries. Refuse to land
     # the file in those cases.
     failed_land = False
+    global error_occurred
     if parse_url(file_url).scheme not in supported_protocols.keys():
         eprint(f"Unsupported protocol specified in FileEntry: {file_url}")
         failed_land = True
@@ -1033,6 +1034,11 @@ def land_file(local_path):
             failed_land = True
             error_occurred = True
         except socket.gaierror as e:
+            wprint(f"Failed to land url. '{file_url}'.")
+            wprint(f"Socket Exception: {e}")
+            failed_land = True
+            error_occurred = True
+        except Exception as e:
             wprint(f"Failed to land url. '{file_url}'.")
             wprint(f"Socket Exception: {e}")
             failed_land = True
