@@ -4,7 +4,7 @@ Rover is an experimental CLI interface for directory-based subscription. It beha
 
 You'll find an overview of this utility on gemini.
 
-1) gemini://kayvr.com/gemlog/2022-03-17-Rover-Experiment.gmi
+1) gemini://kayvr.com/gemlog/2022-03-17-Rover-Experiments.gmi
 2) gemini://kayvr.com/gemlog/2022-03-31-Rover-Tours-With-Gemini.gmi
 
 ## Installation
@@ -51,7 +51,7 @@ Rover operates on local filesystems by allowing you to 'subscribe' to directory 
 
 You can find an overview of using rover for a local filesystem here:
 
-* [Introducing Rover](gemini://kayvr.com/gemlog/2022-03-17-Rover-Experiment.gmi)
+* gemini://kayvr.com/gemlog/2022-03-17-Rover-Experiments.gmi
 
 ### Important notes
 
