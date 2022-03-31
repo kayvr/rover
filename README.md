@@ -4,8 +4,8 @@ Rover is an experimental CLI interface for directory-based subscription. It beha
 
 You'll find an overview of this utility on gemini.
 
-1) [Introducing Rover](gemini://kayvr.com/gemlog/2022-03-17-Rover-Experiment.gmi)
-2) [Rover and Gemini](gemini://kayvr.com/gemlog/2022-03-31-Rover-Tours-With-Gemini.gmi)
+1) gemini://kayvr.com/gemlog/2022-03-17-Rover-Experiment.gmi
+2) gemini://kayvr.com/gemlog/2022-03-31-Rover-Tours-With-Gemini.gmi
 
 ## Installation
 
@@ -69,5 +69,5 @@ $ rover land a # If ~/foo/a exists
 
 Rover also supports gemini. Using rover with gemin is similar to local filesystems. Though rover treats gemtext files (like index.gmi) as directories. For more info, check out:
 
-* [Rover and Gemini](gemini://kayvr.com/gemlog/2022-03-31-Rover-Tours-With-Gemini.gmi)
+* gemini://kayvr.com/gemlog/2022-03-31-Rover-Tours-With-Gemini.gmi
 
